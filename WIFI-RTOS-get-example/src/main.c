@@ -12,10 +12,26 @@
 	
 	
 	
-#define BUT_PIO           PIOD
-#define BUT_PIO_ID        ID_PIOD
-#define BUT_PIO_IDX       30u
+#define BUT_PIO           PIOC
+#define BUT_PIO_ID        ID_PIOC
+#define BUT_PIO_IDX       13u
 #define BUT_IDX_MASK  (1u << BUT_PIO_IDX)
+
+
+/** The conversion data is done flag */
+volatile bool g_is_conversion_done = false;
+
+/** The conversion data value */
+
+volatile uint32_t g_ul_value = 0;
+
+/* Canal do sensor de temperatura */
+
+#define AFEC_CHANNEL_TEMP_SENSOR AFEC_CHANNEL_0
+
+#define MAX_DIGITAL     (4095UL)
+
+QueueHandle_t xQueueafec;
 
 /** IP address of host. */
 uint32_t gu32HostIp = 0;
@@ -68,6 +84,17 @@ void but_callback(void){
 	printf("semafaro tx \n");
 }
 
+
+static void AFEC_Temp_callback(void)
+
+{
+	uint32_t temp;
+	temp = afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR);
+	xQueueSendFromISR(xQueueafec,&temp,NULL);
+
+
+
+}
 
 /**
  * \brief Called if stack overflow during execution
@@ -220,6 +247,8 @@ static void resolve_cb(uint8_t *hostName, uint32_t hostIp)
  */
 static void socket_cb(SOCKET sock, uint8_t u8Msg, void *pvMsg)
 {
+	int valor = 0;
+	char value[100];
   
 	/* Check for socket event on TCP socket. */
 	if (sock == tcp_client_socket) {
@@ -230,19 +259,32 @@ static void socket_cb(SOCKET sock, uint8_t u8Msg, void *pvMsg)
       printf("socket_msg_connect\n"); 
 			if (gbTcpConnection) {
 				memset(gau8ReceivedBuffer, 0, sizeof(gau8ReceivedBuffer));
-				sprintf((char *)gau8ReceivedBuffer, "%s", MAIN_PREFIX_BUFFER);
+				sprintf((char *)gau8ReceivedBuffer, "%s", "GET / HTTP/1.1\r\n Accept: */*\r\nHost:arthurolga.pythonanywhere.com\r\n\r\n");
 				tstrSocketConnectMsg *pstrConnect = (tstrSocketConnectMsg *)pvMsg;
 				
 				if (pstrConnect && pstrConnect->s8Error >= SOCK_ERR_NO_ERROR) {
           printf("send \n");
 					
-					//send(tcp_client_socket,"GET /b HTTP/1.1\r\n Accept: */*\r\n\r\n", 100, 0);
 					if( xSemaphoreTake(xSemaphore, ( TickType_t ) 500) == pdTRUE){
-						printf(">>>>>>>Butao");
-						send(tcp_client_socket,"GET /b HTTP/1.1\r\n Accept: */*\r\n\r\n", 100, 0);
+						printf(">>>>>>>Botao\n");
+						sprintf(gau8ReceivedBuffer,"GET /b HTTP/1.1\r\n Accept: */*\r\nHost:arthurolga.pythonanywhere.com\r\n\r\n");
+						send(tcp_client_socket,gau8ReceivedBuffer, strlen(gau8ReceivedBuffer), 0);
+						memset(gau8ReceivedBuffer, 0, MAIN_WIFI_M2M_BUFFER_SIZE);
+						recv(tcp_client_socket, &gau8ReceivedBuffer[0], MAIN_WIFI_M2M_BUFFER_SIZE, 0);
 					} else{
-						printf(">>>>>>>AFEC");
-						send(tcp_client_socket,"GET / HTTP/1.1\r\n Accept: */*\r\n\r\n", strlen((char *)gau8ReceivedBuffer), 0);
+						printf(">>>>>>>AFEC\n");
+						 if (xQueueReceive( xQueueafec, &(valor), ( TickType_t )  10 / portTICK_PERIOD_MS)) {
+							 sprintf(gau8ReceivedBuffer,"GET /afec?v=%d HTTP/1.1\r\n Accept: */*\r\nHost:arthurolga.pythonanywhere.com\r\n\r\n",valor);
+							 send(tcp_client_socket,gau8ReceivedBuffer, strlen(gau8ReceivedBuffer), 0);
+							 memset(gau8ReceivedBuffer, 0, MAIN_WIFI_M2M_BUFFER_SIZE);
+							 recv(tcp_client_socket, &gau8ReceivedBuffer[0], MAIN_WIFI_M2M_BUFFER_SIZE, 0);
+							 
+						 } else{
+							 send(tcp_client_socket,gau8ReceivedBuffer, strlen(gau8ReceivedBuffer), 0);
+							 memset(gau8ReceivedBuffer, 0, MAIN_WIFI_M2M_BUFFER_SIZE);
+							 recv(tcp_client_socket, &gau8ReceivedBuffer[0], MAIN_WIFI_M2M_BUFFER_SIZE, 0);
+						 }
+						 //send(tcp_client_socket,gau8ReceivedBuffer, strlen(gau8ReceivedBuffer), 0);
 					}
 					memset(gau8ReceivedBuffer, 0, MAIN_WIFI_M2M_BUFFER_SIZE);
 					recv(tcp_client_socket, &gau8ReceivedBuffer[0], MAIN_WIFI_M2M_BUFFER_SIZE, 0);
@@ -305,22 +347,58 @@ static void set_dev_name_to_mac(uint8_t *name, uint8_t *mac_addr)
  *
  * \return None.
  */
+static void config_ADC_TEMP(void){
 
+/*************************************
+   * Ativa e configura AFEC
+   *************************************/
+  /* Ativa AFEC - 0 */
+	afec_enable(AFEC0);
+	/* struct de configuracao do AFEC */
+	struct afec_config afec_cfg;
+	/* Carrega parametros padrao */
+	afec_get_config_defaults(&afec_cfg);
+	/* Configura AFEC */
+	afec_init(AFEC0, &afec_cfg);
+	/* Configura trigger por software */
+	afec_set_trigger(AFEC0, AFEC_TRIG_SW);
+	/* configura call back */
+	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_0,	AFEC_Temp_callback, 5);
+	/*** Configuracao espec√≠fica do canal AFEC ***/
+	struct afec_ch_config afec_ch_cfg;
+	afec_ch_get_config_defaults(&afec_ch_cfg);
+	afec_ch_cfg.gain = AFEC_GAINVALUE_0;
+	afec_ch_set_config(AFEC0, AFEC_CHANNEL_TEMP_SENSOR, &afec_ch_cfg);
+	/*
+	* Calibracao:
+	* Because the internal ADC offset is 0x200, it should cancel it and shift
+	 down to 0.
+	 */
+	afec_channel_set_analog_offset(AFEC0, AFEC_CHANNEL_TEMP_SENSOR, 0x200);
+	/***  Configura sensor de temperatura ***/
+	struct afec_temp_sensor_config afec_temp_sensor_cfg;
+	afec_temp_sensor_get_config_defaults(&afec_temp_sensor_cfg);
+	afec_temp_sensor_set_config(AFEC0, &afec_temp_sensor_cfg);
+
+	/* Selecina canal e inicializa convers√£o */
+	afec_channel_enable(AFEC0, AFEC_CHANNEL_TEMP_SENSOR);
+
+}
 
 void io_init(void)
 {
-	// Inicializa clock do perifÈrico PIO responsavel pelo botao
+	// Inicializa clock do perif√©rico PIO responsavel pelo botao
 	pmc_enable_periph_clk(BUT_PIO_ID);
 	//pmc_enable_periph_clk(BUT2_PIO_ID);
 
-	// Configura PIO para lidar com o pino do bot„o como entrada
+	// Configura PIO para lidar com o pino do bot√£o como entrada
 	// com pull-up
 	pio_configure(BUT_PIO, PIO_INPUT, BUT_IDX_MASK, PIO_PULLUP | PIO_DEBOUNCE);
 	//pio_configure(BUT2_PIO, PIO_INPUT, BUT2_IDX_MASK, PIO_PULLUP| PIO_DEBOUNCE);
 
-	// Configura interrupÁ„o no pino referente ao botao e associa
-	// funÁ„o de callback caso uma interrupÁ„o for gerada
-	// a funÁ„o de callback È a: but_callback()
+	// Configura interrup√ß√£o no pino referente ao botao e associa
+	// fun√ß√£o de callback caso uma interrup√ß√£o for gerada
+	// a fun√ß√£o de callback √© a: but_callback()
 	pio_handler_set(BUT_PIO,
 	BUT_PIO_ID,
 	BUT_IDX_MASK,
@@ -329,12 +407,12 @@ void io_init(void)
 	
 	
 
-	// Ativa interrupÁ„o
+	// Ativa interrup√ß√£o
 	pio_enable_interrupt(BUT_PIO, BUT_IDX_MASK);
 	//pio_enable_interrupt(BUT2_PIO, BUT2_IDX_MASK);
 
 	// Configura NVIC para receber interrupcoes do PIO do botao
-	// com prioridade 4 (quanto mais prÛximo de 0 maior)
+	// com prioridade 4 (quanto mais pr√≥ximo de 0 maior)
 	NVIC_EnableIRQ(BUT_PIO_ID);
 	NVIC_SetPriority(BUT_PIO_ID, 4); // Prioridade 4
 	//NVIC_EnableIRQ(BUT2_PIO_ID);
@@ -395,7 +473,7 @@ static void task_monitor(void *pvParameters)
 		printf("--- task ## %u", (unsigned int)uxTaskGetNumberOfTasks());
 		vTaskList((signed portCHAR *)szList);
 		printf(szList);
-		vTaskDelay(1000);
+		vTaskDelay(2000);
 	}
 }
 
@@ -410,6 +488,17 @@ static void task_but(void *pvParameters)
 			
 		}
 
+}
+
+void task_afec(void){
+	xQueueafec= xQueueCreate( 10, sizeof( uint32_t ) );
+	config_ADC_TEMP();
+	while (true) {
+		//
+		("Starting ADC\n");
+		afec_start_software_conversion(AFEC0);
+		vTaskDelay(1000);
+	}
 }
 
 
@@ -505,6 +594,10 @@ int main(void)
 	TASK_WIFI_STACK_PRIORITY, NULL) != pdPASS) {
 		printf("Failed to create Wifi task\r\n");
 	}
+	if (xTaskCreate(task_afec, "afec", TASK_WIFI_STACK_SIZE, NULL,
+	TASK_WIFI_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create Wifi task\r\n");
+	}
 
 	vTaskStartScheduler();
 	
@@ -512,3 +605,4 @@ int main(void)
 	return 0;
 
 }
+
